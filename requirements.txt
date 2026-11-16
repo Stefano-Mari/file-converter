@@ -1,0 +1,10 @@
+pillow
+pillow-heif
+pymupdf
+pymupdf4llm
+pdf2docx
+markdown
+openpyxl
+imageio-ffmpeg
+tkinterdnd2
+pywin32
