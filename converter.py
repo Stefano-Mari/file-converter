@@ -56,7 +56,14 @@ def _open_image(src: Path):
         import pillow_heif
 
         pillow_heif.register_heif_opener()
-    return Image.open(src)
+    img = Image.open(src)
+    if getattr(img, "n_frames", 1) == 1:
+        # Cameras store photos sideways plus an EXIF "orientation" tag; apply it
+        # so the pixels are upright (and the tag isn't carried into the output).
+        from PIL import ImageOps
+
+        img = ImageOps.exif_transpose(img)
+    return img
 
 
 def image_to_image(src: Path, dst: Path, opts: dict) -> list[Path]:
