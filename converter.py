@@ -57,11 +57,15 @@ def _open_image(src: Path):
 
         pillow_heif.register_heif_opener()
     img = Image.open(src)
-    if getattr(img, "n_frames", 1) == 1:
+    # iPhone JPEGs are "MPO" files: the photo plus a hidden HDR gain map as a
+    # second frame. They are single pictures, not animations.
+    if getattr(img, "n_frames", 1) == 1 or img.format == "MPO":
         # Cameras store photos sideways plus an EXIF "orientation" tag; apply it
         # so the pixels are upright (and the tag isn't carried into the output).
+        # The result is a plain single-frame image.
         from PIL import ImageOps
 
+        img.seek(0)
         img = ImageOps.exif_transpose(img)
     return img
 
