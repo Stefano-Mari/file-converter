@@ -116,27 +116,7 @@ def _finish_pages(pages: list[Path], dst: Path, opts: dict, label: str) -> list[
         return [out]
 
     if mode == "combine":
-        from PIL import Image
-
-        images = [Image.open(p).convert("RGB") for p in pages]
-        width = max(im.width for im in images)
-        gap = max(8, width // 120)
-        height = sum(im.height for im in images) + gap * (len(images) - 1)
-        limit = _MAX_HEIGHT.get(dst.suffix.lower())
-        if limit and height > limit:  # shrink everything so it fits the format
-            gap = max(1, int(gap * limit / height))
-            room = limit - gap * (len(images) - 1)
-            scale = room / sum(im.height for im in images)
-            images = [im.resize((max(1, int(im.width * scale)), max(1, int(im.height * scale))), Image.LANCZOS)
-                      for im in images]
-            width = max(im.width for im in images)
-            height = sum(im.height for im in images) + gap * (len(images) - 1)
-        sheet = Image.new("RGB", (width, height), (225, 228, 233))
-        y = 0
-        for im in images:
-            sheet.paste(im, ((width - im.width) // 2, y))
-            y += im.height + gap
-        return image_to_image_obj(sheet, dst, opts)
+        return _stack_images(pages, dst, opts)
 
     outputs = []
     for i, p in enumerate(pages, start=1):
@@ -144,6 +124,44 @@ def _finish_pages(pages: list[Path], dst: Path, opts: dict, label: str) -> list[
         shutil.move(p, out)
         outputs.append(out)
     return outputs
+
+
+def _frames(paths: list[Path]):
+    """Every frame of every image (animated GIFs and multi-page TIFFs included), as RGB."""
+    from PIL import Image, ImageSequence
+
+    for p in paths:
+        img = _open_image(p)
+        for frame in ImageSequence.Iterator(img):
+            rgba = frame.convert("RGBA")
+            bg = Image.new("RGB", rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.split()[-1])
+            yield bg
+
+
+def _stack_images(paths: list[Path], dst: Path, opts: dict) -> list[Path]:
+    """Stack images top to bottom into one tall image."""
+    from PIL import Image
+
+    images = list(_frames(paths))
+    width = max(im.width for im in images)
+    gap = max(8, width // 120)
+    height = sum(im.height for im in images) + gap * (len(images) - 1)
+    limit = _MAX_HEIGHT.get(dst.suffix.lower())
+    if limit and height > limit:  # shrink everything so it fits the format
+        gap = max(1, int(gap * limit / height))
+        room = limit - gap * (len(images) - 1)
+        scale = room / sum(im.height for im in images)
+        images = [im.resize((max(1, int(im.width * scale)), max(1, int(im.height * scale))), Image.LANCZOS)
+                  for im in images]
+        width = max(im.width for im in images)
+        height = sum(im.height for im in images) + gap * (len(images) - 1)
+    sheet = Image.new("RGB", (width, height), (225, 228, 233))
+    y = 0
+    for im in images:
+        sheet.paste(im, ((width - im.width) // 2, y))
+        y += im.height + gap
+    return image_to_image_obj(sheet, dst, opts)
 
 
 def image_to_image_obj(img, dst: Path, opts: dict) -> list[Path]:
@@ -397,7 +415,37 @@ def powerpoint_convert(src: Path, dst: Path, opts: dict) -> list[Path]:
     finally:
         if pres is not None:
             pres.Close()
+        _release_powerpoint(ppt)
+
+
+def _release_powerpoint(ppt) -> None:
+    """Quit PowerPoint unless the user has presentations open, and wait for it to exit.
+
+    PowerPoint runs as one shared instance, so automation attaches to whatever
+    is already running. Quitting it would close the user's own work, and
+    starting the next conversion while it is still shutting down can hang.
+    """
+    import win32api
+    import win32event
+    import win32process
+
+    try:
+        if ppt.Presentations.Count > 0:
+            return  # someone else's presentations are open: leave it running
+        pid = win32process.GetWindowThreadProcessId(ppt.HWND)[1]
+    except Exception:
+        pid = None
+    try:
         ppt.Quit()
+    except Exception:
+        return
+    if pid:
+        try:
+            handle = win32api.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+            win32event.WaitForSingleObject(handle, 20000)
+            win32api.CloseHandle(handle)
+        except Exception:
+            pass
 
 
 EXCEL_FORMATS = {"xlsx": 51, "xls": 56, "csv": 62, "ods": 60, "html": 44}
@@ -566,18 +614,41 @@ def _ffmpeg() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
+_AUDIO_ARGS = {
+    "mp3": ["-c:a", "libmp3lame", "-q:a", "2"],
+    "m4a": ["-c:a", "aac", "-b:a", "192k"],
+    "aac": ["-c:a", "aac", "-b:a", "192k"],
+    "ogg": ["-c:a", "libvorbis", "-q:a", "5"],
+    "opus": ["-c:a", "libopus", "-b:a", "128k"],
+}
+
+
+def _run_ffmpeg(args: list[str]) -> None:
+    result = subprocess.run(args, capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "ffmpeg failed")
+
+
+def _concat_audio(paths: list[Path], dst: Path) -> None:
+    """Join the audio of several audio/video files end to end."""
+    ext = dst.suffix.lower().lstrip(".")
+    args = [_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error"]
+    for p in paths:
+        args += ["-i", str(p)]
+    # Bring every input to the same sample rate / layout so they can be joined.
+    rate = "48000" if ext == "opus" else "44100"
+    chains = [f"[{i}:a:0]aresample={rate},aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}]" for i in range(len(paths))]
+    joined = "".join(f"[a{i}]" for i in range(len(paths)))
+    graph = ";".join(chains) + f";{joined}concat=n={len(paths)}:v=0:a=1[out]"
+    args += ["-filter_complex", graph, "-map", "[out]"] + _AUDIO_ARGS.get(ext, []) + [str(dst)]
+    _run_ffmpeg(args)
+
+
 def ffmpeg_convert(src: Path, dst: Path, opts: dict) -> list[Path]:
     ext = dst.suffix.lower().lstrip(".")
     args = [_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error", "-i", str(src)]
     if ext in AUDIO_OUT:
-        args += ["-vn"]
-        args += {
-            "mp3": ["-c:a", "libmp3lame", "-q:a", "2"],
-            "m4a": ["-c:a", "aac", "-b:a", "192k"],
-            "aac": ["-c:a", "aac", "-b:a", "192k"],
-            "ogg": ["-c:a", "libvorbis", "-q:a", "5"],
-            "opus": ["-c:a", "libopus", "-b:a", "128k"],
-        }.get(ext, [])
+        args += ["-vn"] + _AUDIO_ARGS.get(ext, [])
     elif ext == "gif":
         args += ["-vf", "fps=12,scale='min(640,iw)':-2:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse", "-loop", "0"]
     elif ext == "webm":
@@ -587,9 +658,7 @@ def ffmpeg_convert(src: Path, dst: Path, opts: dict) -> list[Path]:
         if ext == "mp4":
             args += ["-movflags", "+faststart"]
     args.append(str(dst))
-    result = subprocess.run(args, capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "ffmpeg failed")
+    _run_ffmpeg(args)
     return [dst]
 
 
@@ -663,3 +732,108 @@ def convert(src: Path | str, target_ext: str, out_dir: Path | str | None = None,
     out_dir.mkdir(parents=True, exist_ok=True)
     dst = unique_path(out_dir / f"{src.stem}.{target_ext}")
     return fn(src, dst, opts or {})
+
+
+# --------------------------------------------------------------------------- combining files
+
+_SAME = {"jpeg": "jpg", "tif": "tiff", "markdown": "md", "htm": "html"}
+_STACKED = {"png", "jpg", "webp", "bmp"}
+MERGE_TARGETS = {"pdf", "tiff", "gif", "txt", "md"} | _STACKED | set(AUDIO_OUT)
+
+
+def _norm(ext: str) -> str:
+    return _SAME.get(ext, ext)
+
+
+def merge_targets_for(path: Path | str) -> list[str]:
+    """Formats this file can be combined into (together with other files)."""
+    return sorted(t for t in MERGE_TARGETS if can_merge(path, t))
+
+
+def can_merge(path: Path | str, target: str) -> bool:
+    ext = ext_of(path)
+    if target in AUDIO_OUT:
+        return ext in AUDIO_EXTS or ext in VIDEO_EXTS
+    return _norm(ext) == target or target in CONVERSIONS.get(ext, {})
+
+
+def _merge_parts(parts: list[Path], dst: Path, opts: dict) -> None:
+    target = dst.suffix.lower().lstrip(".")
+    if target == "pdf":
+        import pymupdf
+
+        out = pymupdf.open()
+        for p in parts:
+            with pymupdf.open(p) as d:
+                out.insert_pdf(d)
+        out.save(dst, garbage=3, deflate=True)
+        out.close()
+    elif target in _STACKED:
+        _stack_images(parts, dst, opts)
+    elif target == "tiff":  # one page per image
+        frames = list(_frames(parts))
+        frames[0].save(dst, "TIFF", save_all=True, append_images=frames[1:], compression="tiff_deflate")
+    elif target == "gif":  # one animation frame per image
+        from PIL import Image
+
+        frames = list(_frames(parts))
+        for f in frames:
+            f.thumbnail((1600, 1600))
+        size = (max(f.width for f in frames), max(f.height for f in frames))
+        padded = []
+        for f in frames:
+            canvas = Image.new("RGB", size, (255, 255, 255))
+            canvas.paste(f, ((size[0] - f.width) // 2, (size[1] - f.height) // 2))
+            padded.append(canvas)
+        padded[0].save(dst, "GIF", save_all=True, append_images=padded[1:],
+                       duration=int(opts.get("frame_ms", 1000)), loop=0)
+    elif target in ("txt", "md"):
+        texts = [p.read_text(encoding="utf-8-sig", errors="replace").rstrip() for p in parts]
+        dst.write_text("\n\n".join(texts) + "\n", encoding="utf-8")
+    else:
+        raise ValueError(f"Can't combine files into .{target}")
+
+
+def merge(paths, target_ext: str, out_dir: Path | str | None = None, opts: dict | None = None,
+          progress=None) -> list[Path]:
+    """Combine several files, in order, into one ``target_ext`` file.
+
+    Each file is first converted to the target format if needed, so e.g. a
+    Word document, two JPEGs and a PDF can all go into one PDF.
+    ``progress(index, state)`` is called with state "start"/"done" per file and
+    ``(None, "merging")`` before the final join.
+    """
+    paths = [Path(p) for p in paths]
+    target = _norm(target_ext.lower().lstrip("."))
+    if target not in MERGE_TARGETS:
+        raise ValueError(f"Can't combine files into .{target}")
+    if not paths:
+        raise ValueError("No files to combine")
+    notify = progress or (lambda i, state: None)
+    out_dir = Path(out_dir) if out_dir else paths[0].parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dst = unique_path(out_dir / f"{paths[0].stem}_combined.{target}")
+    opts = dict(opts or {}, pages="separate")  # every page/slide becomes its own part
+
+    if target in AUDIO_OUT:
+        for i in range(len(paths)):
+            notify(i, "start")
+            notify(i, "done")
+        notify(None, "merging")
+        _concat_audio(paths, dst)
+        return [dst]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        parts: list[Path] = []
+        for i, p in enumerate(paths):
+            notify(i, "start")
+            if _norm(ext_of(p)) == target:
+                parts.append(p)
+            else:
+                sub = Path(tmp) / str(i)
+                sub.mkdir()
+                parts += convert(p, target, sub, opts)
+            notify(i, "done")
+        notify(None, "merging")
+        _merge_parts(parts, dst, opts)
+    return [dst]

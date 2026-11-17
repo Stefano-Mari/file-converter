@@ -58,8 +58,8 @@ class App(BaseTk):
     def __init__(self):
         super().__init__()
         self.title("File Converter")
-        self.geometry("900x720")
-        self.minsize(760, 640)
+        self.geometry("900x760")
+        self.minsize(760, 680)
         self.configure(bg=BG)
         icon = Path(__file__).with_name("icon.ico")
         if icon.exists():
@@ -69,6 +69,7 @@ class App(BaseTk):
         self.outputs: dict[str, list[Path]] = {}  # tree item id -> converted files
         self.events: queue.Queue = queue.Queue()
         self.busy = False
+        self.combined = False
         self.out_dir: Path | None = None
         self.target_map: dict[str, str] = {}
 
@@ -99,6 +100,7 @@ class App(BaseTk):
         s.map("Treeview", background=[("selected", "#dbe7fe")], foreground=[("selected", TEXT)])
         s.configure("TCombobox", padding=5)
         s.configure("TRadiobutton", background=CARD)
+        s.configure("Card.TCheckbutton", background=CARD)
         s.configure("Horizontal.TProgressbar", troughcolor="#e5e7eb", background=ACCENT, thickness=8)
 
     def _build(self):
@@ -121,6 +123,8 @@ class App(BaseTk):
         ttk.Button(bar, text="Add folder", command=self.add_folder).pack(side="left", padx=6)
         ttk.Button(bar, text="Remove", command=self.remove_selected).pack(side="left")
         ttk.Button(bar, text="Clear", command=self.clear).pack(side="left", padx=6)
+        ttk.Button(bar, text="↑", width=3, command=lambda: self.move_selected(-1)).pack(side="left", padx=(12, 0))
+        ttk.Button(bar, text="↓", width=3, command=lambda: self.move_selected(1)).pack(side="left", padx=6)
         self.count_lbl = ttk.Label(bar, text="", style="CardMuted.TLabel")
         self.count_lbl.pack(side="right")
 
@@ -195,6 +199,15 @@ class App(BaseTk):
         ttk.Combobox(p_row, textvariable=self.pages_var, state="readonly", width=34,
                      values=[label for label, _ in PAGE_MODES]).pack(side="left")
         ttk.Label(p_row, text="when a PDF or slideshow becomes images", style="CardMuted.TLabel").pack(side="left", padx=8)
+
+        ttk.Label(opts, text="Combine", style="Card.TLabel", font=("Segoe UI Semibold", 10)).grid(row=4, column=0, sticky="w", pady=(10, 0))
+        c_row = ttk.Frame(opts, style="Card.TFrame")
+        c_row.configure(borderwidth=0)
+        c_row.grid(row=4, column=1, columnspan=4, sticky="w", padx=10, pady=(10, 0))
+        self.combine_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(c_row, text="Combine all files into one file", variable=self.combine_var,
+                        command=self._refresh_targets, style="Card.TCheckbutton").pack(side="left")
+        ttk.Label(c_row, text="in list order — use ↑ ↓ to reorder", style="CardMuted.TLabel").pack(side="left", padx=8)
 
         # action bar
         actions = ttk.Frame(self)
@@ -277,9 +290,12 @@ class App(BaseTk):
 
         # Offer every target at least one file supports, most widely supported first.
         counts: dict[str, int] = {}
+        available = self._targets_of
         for p in self.files.values():
-            for t in converter.targets_for(p):
+            for t in available(p):
                 counts[t] = counts.get(t, 0) + 1
+        if self.combine_var.get():  # combining needs at least two files per format
+            counts = {t: c for t, c in counts.items() if c >= 2}
         ordered = sorted(counts, key=lambda t: (-counts[t], t))
         self.target_map = {label_for(t): t for t in ordered}
         labels = list(self.target_map)
@@ -289,12 +305,39 @@ class App(BaseTk):
         self.target_box.bind("<<ComboboxSelected>>", lambda e: self._update_hint(counts, n))
         self._update_hint(counts, n)
 
+    def _targets_of(self, path: Path) -> list[str]:
+        """Formats on offer for a file: merge formats when combining, else conversions."""
+        if self.combine_var.get():
+            return converter.merge_targets_for(path)
+        return converter.targets_for(path)
+
+    def move_selected(self, delta: int):
+        if self.busy:
+            return
+        selected = list(self.tree.selection())
+        if delta > 0:
+            selected.reverse()
+        count = len(self.tree.get_children())
+        for iid in selected:
+            new = self.tree.index(iid) + delta
+            if 0 <= new < count and self.tree.get_children()[new] not in selected:
+                self.tree.move(iid, "", new)
+        if selected:
+            self.tree.see(selected[0])
+
+    def _ordered_files(self) -> list[tuple[str, Path]]:
+        """Files in the order shown in the list."""
+        return [(iid, self.files[iid]) for iid in self.tree.get_children() if iid in self.files]
+
     def _update_hint(self, counts, n):
         t = self.target_map.get(self.target_var.get())
         if not n:
             self.target_hint.configure(text="Add files to see available formats")
+        elif self.combine_var.get() and not self.target_map:
+            self.target_hint.configure(text="These files can't be combined")
         elif t and counts.get(t, 0) < n:
-            self.target_hint.configure(text=f"{n - counts[t]} file(s) can't become .{t} and will be skipped")
+            verb = "go into a" if self.combine_var.get() else "become"
+            self.target_hint.configure(text=f"{n - counts[t]} file(s) can't {verb} .{t} and will be skipped")
         else:
             self.target_hint.configure(text="")
 
@@ -326,13 +369,51 @@ class App(BaseTk):
             opts = {"dpi": 150, "quality": 90}
         opts["pages"] = dict(PAGE_MODES).get(self.pages_var.get(), "combine")
 
-        jobs = list(self.files.items())
+        jobs = self._ordered_files()
+        combine = self.combine_var.get()
+        if combine and sum(converter.can_merge(p, target) for _, p in jobs) < 2:
+            messagebox.showinfo("File Converter", f"Combining needs at least two files that can go into a .{target} file.")
+            return
         self.busy = True
-        self.convert_btn.configure(state="disabled", text="Converting…")
+        self.combined = combine
+        self.convert_btn.configure(state="disabled", text="Combining…" if combine else "Converting…")
         self.progress.configure(maximum=len(jobs), value=0)
         for iid, _ in jobs:
             self.tree.item(iid, values=(self.tree.item(iid, "values")[0], "Waiting…"), tags=())
-        threading.Thread(target=self._worker, args=(jobs, target, out_dir, opts), daemon=True).start()
+        worker = self._merge_worker if combine else self._worker
+        threading.Thread(target=worker, args=(jobs, target, out_dir, opts), daemon=True).start()
+
+    def _merge_worker(self, jobs, target, out_dir, opts):
+        included = []
+        for iid, path in jobs:
+            if converter.can_merge(path, target):
+                included.append((iid, path))
+            else:
+                self.events.put(("skip", iid, f"Skipped — can't go into a .{target}"))
+        current = {"i": None}
+
+        def progress(i, state):
+            current["i"] = i
+            if i is None:
+                return
+            iid = included[i][0]
+            if state == "start":
+                self.events.put(("running", iid, "Preparing…"))
+            else:
+                self.events.put(("part", iid, "Ready to combine"))
+
+        try:
+            outs = converter.merge([p for _, p in included], target, out_dir, opts, progress)
+            self.events.put(("merged", [iid for iid, _ in included], outs))
+        except Exception as e:
+            msg = str(e).strip().splitlines()[-1] if str(e).strip() else type(e).__name__
+            failed = current["i"]
+            for n, (iid, _) in enumerate(included):
+                if failed is None or n == failed:
+                    self.events.put(("err", iid, msg))
+                else:
+                    self.events.put(("cancel", iid, "Not combined — another file failed"))
+        self.events.put(("done", None, None))
 
     def _worker(self, jobs, target, out_dir, opts):
         for iid, path in jobs:
@@ -355,13 +436,23 @@ class App(BaseTk):
                 if kind == "done":
                     self._finish()
                     continue
+                if kind == "merged":
+                    for one in iid:
+                        self.outputs[one] = data
+                        self.tree.item(one, values=(self.tree.item(one, "values")[0], f"✓  in {data[0].name}"), tags=("ok",))
+                    continue
                 type_col = self.tree.item(iid, "values")[0]
+                if kind == "cancel":
+                    self.tree.item(iid, values=(type_col, data), tags=("skip",))
+                    continue
                 if kind == "running":
                     self.tree.item(iid, values=(type_col, data))
                     self.tree.see(iid)
                     continue
                 self.progress["value"] = self.progress["value"] + 1  # step() wraps to 0 at max
-                if kind == "ok":
+                if kind == "part":
+                    self.tree.item(iid, values=(type_col, data))
+                elif kind == "ok":
                     self.outputs[iid] = data
                     text = f"✓  {data[0].name}" if len(data) == 1 else f"✓  {len(data)} files ({data[0].name}, …)"
                     self.tree.item(iid, values=(type_col, text), tags=("ok",))
@@ -378,7 +469,10 @@ class App(BaseTk):
         self.convert_btn.configure(state="normal", text="Convert")
         ok = sum(1 for iid in self.files if "ok" in self.tree.item(iid, "tags"))
         bad = sum(1 for iid in self.files if "err" in self.tree.item(iid, "tags"))
-        text = f"Done: {ok} converted" + (f", {bad} failed" if bad else "")
+        if self.combined:
+            text = f"Combined {ok} files into one" if ok else "Nothing combined"
+        else:
+            text = f"Done: {ok} converted" + (f", {bad} failed" if bad else "")
         self.status_lbl.configure(text=text)
         if self.outputs:
             self.open_btn.configure(state="normal")

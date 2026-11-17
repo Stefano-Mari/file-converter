@@ -26,6 +26,21 @@ When a PDF or slideshow becomes images, **Pages** controls what you get:
 
 JPEG and WebP have maximum image heights (about 65,000 and 16,000 pixels). Very long documents are scaled down to fit, so for those, PNG or the zipped option keeps full detail.
 
+## Combining files
+
+Tick **Combine all files into one file** to merge everything in the list into a single file, in list order. Use the **↑** and **↓** buttons to reorder. The result is named after the first file, e.g. `photo_combined.pdf`.
+
+| Combine into | What you get | Works with |
+|---|---|---|
+| **PDF** | One PDF, each file's pages in order | Anything that can become a PDF: images, PDFs, Word, PowerPoint, Excel, Markdown, text, HTML, CSV |
+| **PNG, JPG, WebP, BMP** | One tall image, stacked top to bottom | Images, PDFs, slideshows |
+| **TIFF** | One multi-page TIFF | Images, PDFs |
+| **GIF** | One animated GIF, one frame per image (1 second each) | Images |
+| **MP3, WAV, FLAC, OGG, M4A, AAC, Opus** | One audio track, played back to back | Audio files, and the audio of video files |
+| **TXT, Markdown** | One text file | Text files, PDFs, Word documents |
+
+Files that can't go into the chosen format are skipped. If a file fails, nothing is produced, so you never get a combined file with a piece silently missing.
+
 Existing files are never overwritten. A new copy gets a numbered name, like `report (1).pdf`.
 
 ## Supported conversions
