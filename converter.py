@@ -89,26 +89,89 @@ def image_to_image(src: Path, dst: Path, opts: dict) -> list[Path]:
 # --------------------------------------------------------------------------- PDF
 
 
+PAGE_MODES = ("combine", "separate", "zip")
+
+# Largest single-image height each format allows.
+_MAX_HEIGHT = {".jpg": 65500, ".jpeg": 65500, ".webp": 16383}
+
+
+def _finish_pages(pages: list[Path], dst: Path, opts: dict, label: str) -> list[Path]:
+    """Turn per-page images (in a temp dir) into the output the user asked for.
+
+    ``combine`` stacks every page into one tall image, ``zip`` packs them into
+    one archive, ``separate`` keeps one file per page next to ``dst``.
+    """
+    mode = opts.get("pages", "combine")
+    if len(pages) == 1:
+        shutil.move(pages[0], dst)
+        return [dst]
+
+    if mode == "zip":
+        import zipfile
+
+        out = unique_path(dst.with_suffix(".zip"))
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in pages:
+                zf.write(p, p.name)
+        return [out]
+
+    if mode == "combine":
+        from PIL import Image
+
+        images = [Image.open(p).convert("RGB") for p in pages]
+        width = max(im.width for im in images)
+        gap = max(8, width // 120)
+        height = sum(im.height for im in images) + gap * (len(images) - 1)
+        limit = _MAX_HEIGHT.get(dst.suffix.lower())
+        if limit and height > limit:  # shrink everything so it fits the format
+            gap = max(1, int(gap * limit / height))
+            room = limit - gap * (len(images) - 1)
+            scale = room / sum(im.height for im in images)
+            images = [im.resize((max(1, int(im.width * scale)), max(1, int(im.height * scale))), Image.LANCZOS)
+                      for im in images]
+            width = max(im.width for im in images)
+            height = sum(im.height for im in images) + gap * (len(images) - 1)
+        sheet = Image.new("RGB", (width, height), (225, 228, 233))
+        y = 0
+        for im in images:
+            sheet.paste(im, ((width - im.width) // 2, y))
+            y += im.height + gap
+        return image_to_image_obj(sheet, dst, opts)
+
+    outputs = []
+    for i, p in enumerate(pages, start=1):
+        out = unique_path(dst.with_name(f"{dst.stem}_{label}{i}{dst.suffix}"))
+        shutil.move(p, out)
+        outputs.append(out)
+    return outputs
+
+
+def image_to_image_obj(img, dst: Path, opts: dict) -> list[Path]:
+    """Save an already-open PIL image in the format implied by ``dst``."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_png = Path(tmp) / "sheet.png"
+        img.save(tmp_png)
+        return image_to_image(tmp_png, dst, opts)
+
+
 def pdf_to_images(src: Path, dst: Path, opts: dict) -> list[Path]:
     import pymupdf
 
     dpi = int(opts.get("dpi", 150))
     ext = dst.suffix.lower()
-    outputs = []
-    with pymupdf.open(src) as doc:
-        single = doc.page_count == 1
+    with tempfile.TemporaryDirectory() as tmp, pymupdf.open(src) as doc:
+        pages = []
         for i, page in enumerate(doc, start=1):
             pix = page.get_pixmap(dpi=dpi, alpha=False)
-            out = dst if single else dst.with_name(f"{dst.stem}_page{i}{ext}")
-            out = unique_path(out)
+            out = Path(tmp) / f"{dst.stem}_page{i}{ext}"
             if ext in (".jpg", ".jpeg"):
                 pix.save(out, jpg_quality=int(opts.get("quality", 90)))
             elif ext == ".png":
                 pix.save(out)
             else:  # webp, tiff etc. via Pillow
                 pix.pil_save(out)
-            outputs.append(out)
-    return outputs
+            pages.append(out)
+        return _finish_pages(pages, dst, opts, "page")
 
 
 def pdf_to_text(src: Path, dst: Path, opts: dict) -> list[Path]:
@@ -316,25 +379,25 @@ def powerpoint_convert(src: Path, dst: Path, opts: dict) -> list[Path]:
     ext = dst.suffix.lower().lstrip(".")
     ppt = _dispatch("PowerPoint.Application")
     pres = None
-    outputs = []
     try:
         pres = ppt.Presentations.Open(_win(src), ReadOnly=True, Untitled=False, WithWindow=False)
         if ext in ("png", "jpg"):
-            scale = int(opts.get("dpi", 150)) / 96
-            width = int(pres.PageSetup.SlideWidth * 96 / 72 * scale)
-            height = int(pres.PageSetup.SlideHeight * 96 / 72 * scale)
-            for i, slide in enumerate(pres.Slides, start=1):
-                out = unique_path(dst.with_name(f"{dst.stem}_slide{i}.{ext}"))
-                slide.Export(_win(out), ext.upper(), width, height)
-                outputs.append(out)
-        else:
-            pres.SaveAs(_win(dst), PPT_FORMATS[ext])
-            outputs.append(dst)
+            dpi = int(opts.get("dpi", 150))
+            width = int(pres.PageSetup.SlideWidth * dpi / 72)
+            height = int(pres.PageSetup.SlideHeight * dpi / 72)
+            with tempfile.TemporaryDirectory() as tmp:
+                pages = []
+                for i, slide in enumerate(pres.Slides, start=1):
+                    out = Path(tmp) / f"{dst.stem}_slide{i}.{ext}"
+                    slide.Export(_win(out), ext.upper(), width, height)
+                    pages.append(out)
+                return _finish_pages(pages, dst, opts, "slide")
+        pres.SaveAs(_win(dst), PPT_FORMATS[ext])
+        return [dst]
     finally:
         if pres is not None:
             pres.Close()
         ppt.Quit()
-    return outputs
 
 
 EXCEL_FORMATS = {"xlsx": 51, "xls": 56, "csv": 62, "ods": 60, "html": 44}

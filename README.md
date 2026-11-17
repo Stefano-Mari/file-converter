@@ -19,15 +19,22 @@ Or from a terminal:
 3. Choose where to save: next to each original file, or in one folder.
 4. Click **Convert**. Double-click a finished row to open its result.
 
+When a PDF or slideshow becomes images, **Pages** controls what you get:
+- **Combine into one image** (default): all pages stacked into one tall image.
+- **One file per page / slide**: e.g. `deck_slide1.png`, `deck_slide2.png`, …
+- **One file per page, zipped**: the separate images packed into one `.zip`.
+
+JPEG and WebP have maximum image heights (about 65,000 and 16,000 pixels). Very long documents are scaled down to fit, so for those, PNG or the zipped option keeps full detail.
+
 Existing files are never overwritten. A new copy gets a numbered name, like `report (1).pdf`.
 
 ## Supported conversions
 
 | From | To |
 |---|---|
-| **PDF** | PNG, JPG, WebP, TIFF (one image per page), DOCX, RTF, ODT, TXT, Markdown, HTML |
+| **PDF** | PNG, JPG, WebP, TIFF (combined, per page, or zipped), DOCX, RTF, ODT, TXT, Markdown, HTML |
 | **Word** (docx, doc, rtf, odt) | PDF, DOCX, DOC, RTF, ODT, TXT, HTML |
-| **PowerPoint** (pptx, ppt, odp, ppsx) | PDF, PNG/JPG (one image per slide), PPTX, ODP |
+| **PowerPoint** (pptx, ppt, odp, ppsx) | PDF, PNG/JPG (combined, per slide, or zipped), PPTX, ODP |
 | **Excel** (xlsx, xls, xlsm, ods) | PDF, CSV, TSV, JSON, HTML, Markdown table, XLSX, XLS, ODS |
 | **Markdown** | PDF, HTML, DOCX, ODT, RTF |
 | **Text** (txt) | PDF, HTML, DOCX, ODT, RTF |

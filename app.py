@@ -43,6 +43,13 @@ LABELS = {
 }
 
 
+PAGE_MODES = [
+    ("Combine into one image", "combine"),
+    ("One file per page / slide", "separate"),
+    ("One file per page, zipped", "zip"),
+]
+
+
 def label_for(ext: str) -> str:
     return f"{ext.upper()}  —  {LABELS.get(ext, ext.upper())}"
 
@@ -51,8 +58,8 @@ class App(BaseTk):
     def __init__(self):
         super().__init__()
         self.title("File Converter")
-        self.geometry("900x680")
-        self.minsize(760, 600)
+        self.geometry("900x720")
+        self.minsize(760, 640)
         self.configure(bg=BG)
         icon = Path(__file__).with_name("icon.ico")
         if icon.exists():
@@ -179,6 +186,15 @@ class App(BaseTk):
         ttk.Label(q_row, text="JPEG/WebP quality", style="CardMuted.TLabel").pack(side="left")
         self.quality_var = tk.IntVar(value=90)
         ttk.Spinbox(q_row, from_=10, to=100, increment=5, textvariable=self.quality_var, width=5).pack(side="left", padx=6)
+
+        ttk.Label(opts, text="Pages", style="Card.TLabel", font=("Segoe UI Semibold", 10)).grid(row=3, column=0, sticky="w", pady=(10, 0))
+        p_row = ttk.Frame(opts, style="Card.TFrame")
+        p_row.configure(borderwidth=0)
+        p_row.grid(row=3, column=1, columnspan=4, sticky="w", padx=10, pady=(10, 0))
+        self.pages_var = tk.StringVar(value=PAGE_MODES[0][0])
+        ttk.Combobox(p_row, textvariable=self.pages_var, state="readonly", width=34,
+                     values=[label for label, _ in PAGE_MODES]).pack(side="left")
+        ttk.Label(p_row, text="when a PDF or slideshow becomes images", style="CardMuted.TLabel").pack(side="left", padx=8)
 
         # action bar
         actions = ttk.Frame(self)
@@ -308,6 +324,7 @@ class App(BaseTk):
             opts = {"dpi": int(self.dpi_var.get()), "quality": int(self.quality_var.get())}
         except (tk.TclError, ValueError):
             opts = {"dpi": 150, "quality": 90}
+        opts["pages"] = dict(PAGE_MODES).get(self.pages_var.get(), "combine")
 
         jobs = list(self.files.items())
         self.busy = True
